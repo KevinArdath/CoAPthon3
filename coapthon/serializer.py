@@ -6,6 +6,7 @@ from coapthon.messages.response import Response
 from coapthon.messages.option import Option
 from coapthon import defines
 from coapthon.messages.message import Message
+from coapthon.messages.slip import slip_encode, slip_decode
 
 __author__ = 'Giacomo Tanganelli'
 
@@ -17,15 +18,19 @@ class Serializer(object):
     Serializer class to serialize and deserialize CoAP message to/from udp streams.
     """
     @staticmethod
-    def deserialize(datagram, source):
+    def deserialize(datagram, source, slip=False):
         """
         De-serialize a stream of byte to a message.
 
         :param datagram: the incoming udp message
         :param source: the source address and port (ip, port)
+        :param slip: notify the decoder that the incoming message is SLIP encapsulated
         :return: the message
         :rtype: Message
         """
+        if slip:
+            datagram = slip_decode(datagram)
+
         try:
             fmt = "!BBH"
             pos = struct.calcsize(fmt)
@@ -129,12 +134,13 @@ class Serializer(object):
             return defines.Codes.BAD_REQUEST.number
 
     @staticmethod
-    def serialize(message):
+    def serialize(message, slip=False):
         """
         Serialize a message to a udp packet
 
         :type message: Message
         :param message: the message to be serialized
+        :param slip: notify the encoder to also SLIP encapsulate
         :rtype: stream of byte
         :return: the message serialized
         """
@@ -245,7 +251,10 @@ class Serializer(object):
             logger.debug(values)
             logging.exception('Failed to pack structure')
 
-        return datagram
+        if slip:
+            return slip_encode(datagram.raw)
+        else:
+            return datagram
 
     @staticmethod
     def is_request(code):

@@ -15,17 +15,19 @@ class HelperClient(object):
     """
     Helper Client class to perform requests to remote servers in a simplified way.
     """
-    def __init__(self, server, sock=None, cb_ignore_read_exception=None, cb_ignore_write_exception=None):
+    def __init__(self, server, sock=None, baudrate=None, slip=False, cb_ignore_read_exception=None, cb_ignore_write_exception=None):
         """
         Initialize a client to perform request to a server.
 
         :param server: the remote CoAP server
         :param sock: if a socket has been created externally, it can be used directly
+        :param baudrate: set the baudrate if the server is a serial port
+        :param slip: use SLIP encapsulation for serial port communication
         :param cb_ignore_read_exception: Callback function to handle exception raised during the socket read operation
-        :param cb_ignore_write_exception: Callback function to handle exception raised during the socket write operation 
+        :param cb_ignore_write_exception: Callback function to handle exception raised during the socket write operation
         """
         self.server = server
-        self.protocol = CoAP(self.server, random.randint(1, 65535), self._wait_response, sock=sock,
+        self.protocol = CoAP(self.server, random.randint(1, 65535), self._wait_response, sock=sock, baudrate=baudrate, slip=slip,
                              cb_ignore_read_exception=cb_ignore_read_exception, cb_ignore_write_exception=cb_ignore_write_exception)
         self.queue = Queue()
 
@@ -256,7 +258,10 @@ class HelperClient(object):
         :return:  the request
         """
         request = Request()
-        request.destination = self.server
+        if self.protocol.is_socket_mode:
+            request.destination = self.server
+        elif self.protocol.is_serial_mode:
+            request.destination = (self.server, None)
         request.code = method.number
         request.uri_path = path
         return request
@@ -270,10 +275,11 @@ class HelperClient(object):
         :return:  the request
         """
         request = Request()
-        request.destination = self.server
+        if self.protocol.is_socket_mode:
+            request.destination = self.server
+        elif self.protocol.is_serial_mode:
+            request.destination = (self.server, None)
         request.code = method.number
         request.uri_path = path
         request.type = defines.Types["NON"]
         return request
-
-

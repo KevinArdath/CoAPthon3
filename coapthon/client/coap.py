@@ -1,6 +1,8 @@
+import ipaddress
 import logging.config
 import os
 import random
+import serial
 import socket
 import threading
 import time
@@ -27,7 +29,7 @@ class CoAP(object):
     """
     Client class to perform requests to remote servers.
     """
-    def __init__(self, server, starting_mid, callback, sock=None, cb_ignore_read_exception=None, cb_ignore_write_exception=None):
+    def __init__(self, server, starting_mid, callback, sock=None, baudrate=None, slip=False, cb_ignore_read_exception=None, cb_ignore_write_exception=None):
         """
         Initialize the client.
 
@@ -35,12 +37,15 @@ class CoAP(object):
         :param callback:the callback function to be invoked when a response is received
         :param starting_mid: used for testing purposes
         :param sock: if a socket has been created externally, it can be used directly
+        :param baudrate: set the baudrate of a serial target
+        :param slip: signal that the serial target uses SLIP encapsulation
         :param cb_ignore_read_exception: Callback function to handle exception raised during the socket read operation
-        :param cb_ignore_write_exception: Callback function to handle exception raised during the socket write operation        
+        :param cb_ignore_write_exception: Callback function to handle exception raised during the socket write operation
         """
         self._currentMID = starting_mid
         self._server = server
         self._callback = callback
+        self._slip = slip
         self._cb_ignore_read_exception = cb_ignore_read_exception
         self._cb_ignore_write_exception = cb_ignore_write_exception
         self.stopped = threading.Event()
@@ -51,18 +56,26 @@ class CoAP(object):
         self._observeLayer = ObserveLayer()
         self._requestLayer = RequestLayer(self)
 
-        addrinfo = socket.getaddrinfo(self._server[0], None)[0]
+        self._socket = None
+        self._serial = None
 
-        if sock is not None:
-            self._socket = sock
-
-        elif addrinfo[0] == socket.AF_INET:
-            self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
+        try:
+            ipaddress.ip_address(self._server[0])
+        except ValueError:
+            self._serial = serial.Serial(self._server, baudrate=baudrate)
         else:
-            self._socket = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
-            self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            addrinfo = socket.getaddrinfo(self._server[0], None)[0]
+
+            if sock is not None:
+                self._socket = sock
+
+            elif addrinfo[0] == socket.AF_INET:
+                self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+            else:
+                self._socket = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+                self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
         self._receiver_thread = None
 
@@ -76,7 +89,30 @@ class CoAP(object):
             event.set()
         if self._receiver_thread is not None:
             self._receiver_thread.join()
-        self._socket.close()
+
+        if self._socket:
+            self._socket.close()
+        elif self._serial:
+            self._serial.close()
+
+    @property
+    def is_socket_mode(self):
+        """
+        Return whether the module is communicating over a socket
+
+        :return: socket mode
+        """
+        return self._socket is not None
+
+    @property
+    def is_serial_mode(self):
+        """
+        Return whether the module is communicating over a serial port
+
+        :return: serial mode
+        """
+
+        return self._serial is not None
 
     @property
     def current_mid(self):
@@ -120,7 +156,7 @@ class CoAP(object):
     def _wait_for_retransmit_thread(transaction):
         """
         Only one retransmit thread at a time, wait for other to finish
-        
+
         """
         if hasattr(transaction, 'retransmit_thread'):
             while transaction.retransmit_thread is not None:
@@ -132,7 +168,7 @@ class CoAP(object):
         """
         A former request resulted in a block wise transfer. With this method, the block wise transfer
         will be continued, including triggering of the retry mechanism.
-        
+
         :param transaction: The former transaction including the request which should be continued.
         """
         transaction = self._messageLayer.send_request(transaction.request)
@@ -151,10 +187,13 @@ class CoAP(object):
         host, port = message.destination
         logger.debug("send_datagram - " + str(message))
         serializer = Serializer()
-        raw_message = serializer.serialize(message)
+        raw_message = serializer.serialize(message, self._slip)
 
         try:
-            self._socket.sendto(raw_message, (host, port))
+            if self._socket:
+                self._socket.sendto(raw_message, (host, port))
+            elif self._serial:
+                self._serial.write(raw_message)
         except Exception as e:
             if self._cb_ignore_write_exception is not None and isinstance(self._cb_ignore_write_exception, collections.Callable):
                 if not self._cb_ignore_write_exception(e, self):
@@ -167,7 +206,7 @@ class CoAP(object):
                 if opt.value == 26:
                     return
 
-        if self._receiver_thread is None or not self._receiver_thread.isAlive():
+        if self._receiver_thread is None or not self._receiver_thread.is_alive():
             self._receiver_thread = threading.Thread(target=self.receive_datagram)
             self._receiver_thread.daemon = True
             self._receiver_thread.start()
@@ -237,9 +276,13 @@ class CoAP(object):
         """
         logger.debug("Start receiver Thread")
         while not self.stopped.isSet():
-            self._socket.settimeout(0.1)
             try:
-                datagram, addr = self._socket.recvfrom(1152)
+                if self._socket:
+                    self._socket.settimeout(0.1)
+                    datagram, addr = self._socket.recvfrom(1152)
+                elif self._serial:
+                    datagram = self._serial.read_all()
+                    addr = (self._serial.port, None)
             except socket.timeout:  # pragma: no cover
                 continue
             except Exception as e:  # pragma: no cover
@@ -261,7 +304,7 @@ class CoAP(object):
 
             source = (host, port)
 
-            message = serializer.deserialize(datagram, source)
+            message = serializer.deserialize(datagram, source, self._slip)
 
             if isinstance(message, Response):
                 logger.debug("receive_datagram - " + str(message))
